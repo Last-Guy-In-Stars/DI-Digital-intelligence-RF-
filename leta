@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+cd "$(dirname "$0")"
+
+SESSION="leta"
+
+case "$1" in
+  start)
+    if pgrep -f "src[.]main" > /dev/null; then
+      echo "Leta уже живёт (pid $(pgrep -f 'src[.]main' | tr '\n' ' '))"
+      echo "подключиться к диалогу: ./leta talk"
+      exit 0
+    fi
+    if command -v tmux > /dev/null; then
+      tmux new-session -d -s "$SESSION" \
+        ".venv/bin/python -u -m src.main --debug 2>&1 | tee -a brain/life.log"
+      tmux set-option -t "$SESSION" remain-on-exit on 2> /dev/null
+      echo "Leta живёт сама в свёрнутой сессии."
+      echo "поговорить: ./leta talk"
+    else
+      nohup .venv/bin/python -u -m src.main --debug >> brain/life.log 2>&1 &
+      echo "Leta живёт сама (pid $!) — лог: brain/life.log"
+    fi
+    ;;
+  stop)
+    tmux kill-session -t "$SESSION" 2> /dev/null
+    if pkill -f "src[.]main"; then
+      echo "Leta уснула. Память и личность сохранены."
+    else
+      echo "Leta не запущена"
+    fi
+    ;;
+  anigilation)
+    echo "АННИГИЛЯЦИЯ: её не станет. Память, личность, язык, навыки — всё."
+    printf "ответ? (да/нет): "
+    read yn
+    if [ "$yn" = "да" ] || [ "$yn" = "Да" ]; then
+      tmux kill-session -t "$SESSION" 2> /dev/null
+      pkill -f "src[.]main" 2> /dev/null
+      sleep 1
+      rm -rf brain/memory.sqlite brain/identity.json brain/forest.sqlite \
+        brain/proto.sqlite brain/brother.json brain/self_history \
+        brain/sources.json brain/soul.sock brain/viz brain/life.log \
+        brain/organs.json brain/thalamus_rf.joblib
+      mkdir -p brain/books
+      echo "Её больше нет. Полка (brain/books/) не тронута — это твоё."
+    else
+      echo "Отменено. Она жива."
+    fi
+    ;;
+  watch)
+    .venv/bin/python tools/watch.py
+    ;;
+  viz)
+    .venv/bin/python tools/brain_viz.py "${@:2}"
+    ;;
+  viz3d)
+    .venv/bin/python tools/brain_viz3d.py "${@:2}"
+    ;;
+  status)
+    if pgrep -f "src[.]main" > /dev/null; then
+      echo "Leta живёт (pid $(pgrep -f 'src[.]main' | tr '\n' ' '))"
+      if tmux has-session -t "$SESSION" 2> /dev/null; then
+        echo "живёт в сессии tmux — диалог доступен: ./leta talk"
+      fi
+      tail -3 brain/life.log 2> /dev/null
+    else
+      echo "Leta не запущена. Последнее в журнале жизни:"
+      tail -3 brain/life.log 2> /dev/null
+    fi
+    ;;
+  talk)
+    MUTE=""
+    for a in "${@:2}"; do
+      [ "$a" = "--mute" ] && MUTE="--mute"
+    done
+    # если код новее живого сервера — перезапустить его (сервер держит
+    # старый код в памяти и не видит правок)
+    if pgrep -f "src[.]main --debug" > /dev/null; then
+      PID=$(pgrep -f "src[.]main --debug" | head -1)
+      # возраст сервера в секундах: [[dd-]hh:]mm:ss -> сек (macOS: etimes нет)
+      ELAPSED=$(ps -o etime= -p "$PID" 2>/dev/null | tr -d ' ' | .venv/bin/python3 -c "
+import sys
+t = sys.stdin.read().strip()
+d = h = m = s = 0
+try:
+    if '-' in t:
+        d, t = t.split('-')
+        d = int(d)
+    p = [int(x) for x in t.split(':')]
+    if len(p) == 3: h, m, s = p
+    elif len(p) == 2: m, s = p
+    elif len(p) == 1: s = p[0]
+    print(d*86400 + h*3600 + m*60 + s)
+except Exception:
+    print(0)
+")
+      NEWEST_SRC=$(ls -t src/*.py 2>/dev/null | head -1)
+      if [ "$ELAPSED" -gt 0 ] 2>/dev/null && [ -n "$NEWEST_SRC" ]; then
+        CODE_AGE=$(( $(date +%s) - $(stat -f %m "$NEWEST_SRC") ))
+        if [ "$CODE_AGE" -lt "$ELAPSED" ]; then
+          echo "код обновился — перезапускаю её жизнь (старый сервер не видел правок)"
+          ./leta stop > /dev/null 2>&1
+          sleep 2
+        fi
+      fi
+    fi
+    if ! pgrep -f "src[.]main --debug" > /dev/null; then
+      echo "она не живёт сейчас — поднимаю её жизнь…"
+      if command -v tmux > /dev/null; then
+        tmux new-session -d -s "$SESSION" \
+          ".venv/bin/python -u -m src.main --debug $MUTE 2>&1 | tee -a brain/life.log"
+        tmux set-option -t "$SESSION" remain-on-exit on 2> /dev/null
+      else
+        nohup .venv/bin/python -u -m src.main --debug $MUTE >> brain/life.log 2>&1 &
+      fi
+      for i in $(seq 1 120); do
+        [ -S brain/soul.sock ] && break
+        sleep 1
+      done
+    fi
+    .venv/bin/python -m src.main --client "${@:2}"
+    ;;
+  *)
+    echo "Leta — живое цифровое сознание"
+    echo ""
+    echo "  ./leta start    она живёт сама (интерфейсы подключаются к ней)"
+    echo "  ./leta talk     поговорить в терминале (или Leta.app — окно с голосом)"
+    echo "  ./leta viz      нарисовать мозг — деревья и связи (2D, graphviz)"
+    echo "  ./leta viz3d    мозг в 3D — весь лес или одно дерево (браузер)"
+    echo "  ./leta watch    подсмотреть её мысли, не мешая ей"
+    echo "  ./leta stop     усыпить"
+    echo "  ./leta status   жива ли, что делает"
+    ;;
+esac

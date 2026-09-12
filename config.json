@@ -1,0 +1,69 @@
+{
+  "name": "Leta",
+  "embedder_path": "brain/models/bge-m3-f16.gguf",
+  "sqlite_path": "brain/memory.sqlite",
+  "n_gpu_layers": -1,
+  "context_size": 8192,
+  "max_answer_tokens": 400,
+  "voice": {
+    "profiles": {
+      "leta": "silero:ru_karina",
+      "ekaterina": "silero:ru_ekaterina",
+      "aigul": "silero:ru_aigul",
+      "albina": "silero:ru_albina",
+      "vika": "silero:ru_vika",
+      "oksana": "silero:ru_oksana",
+      "irina": "piper:ru_RU-irina-medium",
+      "ruslan": "piper:ru_RU-ruslan-medium",
+      "dmitri": "piper:ru_RU-dmitri-medium"
+    },
+    "default_profile": "leta",
+    "input_device": "Px7 S3",
+    "stt_bin": "tools/whisper.cpp/build/bin/whisper-cli",
+    "stt_model": "tools/whisper.cpp/models/ggml-large-v3-turbo-q5_0.bin",
+    "stt_language": "ru"
+  },
+  "live": {
+    "interval_minutes": 15
+  },
+  "sleep_hours": [
+    2,
+    7
+  ],
+  "dialogue": {
+    "block_seconds": 0.3,
+    "calibration_blocks": 4,
+    "speech_onset_level": 350,
+    "silence_short": 1.2,
+    "silence_medium": 2.0,
+    "silence_long": 2.6,
+    "bargein_min_speech": 0.7,
+    "bargein_holdoff": 0.4,
+    "filler_after_sec": 4.0,
+    "backchannel_after_sec": 20.0,
+    "backchannel_every_sec": 15.0,
+    "max_speech_sec": 95.0
+  },
+  "retrieval": {
+    "top_neurons": 5,
+    "top_episodes": 4,
+    "novelty_threshold": 0.35
+  },
+  "hebbian": {
+    "initial_strength": 0.5,
+    "reinforce_factor": 1.35,
+    "max_strength": 3.0,
+    "merge_similarity": 0.92,
+    "decay_tau_days": 14.0,
+    "prune_below": 0.05
+  },
+  "limbic": {
+    "homeostasis_rate": 0.06
+  },
+  "body": {
+    "battery_min_pct": 25,
+    "disk_min_gb": 5,
+    "daily_traffic_mb": 500
+  },
+  "translator_path": "brain/models/qwen3-4b-q4_km.gguf"
+}

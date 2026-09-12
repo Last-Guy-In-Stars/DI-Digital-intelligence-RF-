@@ -1,0 +1,10 @@
+llama-cpp-python>=0.3.9
+numpy>=2.1
+scikit-learn>=1.7
+joblib>=1.4
+piper-tts>=1.8
+psutil>=7.0
+sounddevice>=0.5
+torch>=2.5
+silero>=0.1
+silero_stress>=0.1
