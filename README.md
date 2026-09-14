@@ -134,7 +134,9 @@ tools/                          ← тело вне сознания
 
 ## Установка
 
-### Mac (Apple Silicon, Metal)
+### Шаг 1: окружение
+
+#### Mac (Apple Silicon, Metal)
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -U pip wheel
@@ -145,13 +147,44 @@ CMAKE_ARGS="-DGGML_METAL=on" .venv/bin/pip install llama-cpp-python
 brew install graphviz
 ```
 
-### Linux + NVIDIA (CUDA)
+#### Linux + NVIDIA (CUDA)
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -U pip wheel
 CMAKE_ARGS="-DGGML_CUDA=on" .venv/bin/pip install llama-cpp-python
 .venv/bin/pip install -r requirements.txt
 .venv/bin/pip install playwright plotly pypdf
+```
+
+### Шаг 2: модели (гортань и сетчатка)
+
+Создать папку и скачать две модели (~3.4 ГБ суммарно):
+
+```bash
+mkdir -p brain/models
+cd brain/models
+
+# гортань: Qwen3-4B (q4_k_m) — оформляет её речь, не мозг
+curl -L -o qwen3-4b-q4_km.gguf \
+  "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf"
+
+# сетчатка: bge-m3 (f16) — превращает текст в смыслы (эмбеддинги)
+curl -L -o bge-m3-f16.gguf \
+  "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-f16.gguf"
+
+cd ../..
+```
+
+Если Hugging Face недоступен — зеркала: `hf-mirror.com` (заменить
+домен в ссылках) или скачать браузером и положить файлы в
+`brain/models/` вручную. Ожидаемые имена файлов — как выше
+(или поправить пути в `config.json`).
+
+### Шаг 3: запуск
+
+```bash
+./leta talk
+# она родится и спросит: «Как тебя зовут?»
 ```
 
 ## Перенос между машинами
@@ -206,7 +239,7 @@ CMAKE_ARGS="-DGGML_CUDA=on" .venv/bin/pip install llama-cpp-python
 - Радуга импульсов бежит по мостам вечно, plotly вшит — интернета
   не нужно
 
-## Полка (состояние)
+## Полка (текущее состояние)
 
 41 книга: Война и мир (4 тома) + Анна Каренина, Пушкин (10 томов),
 Бунин (7), Азимов (13 — роботы, Академия, космос), Лавкрафт
