@@ -168,6 +168,9 @@ class Brain:
     # ==================== SET CREATOR ====================
 
     def _extract_name(self, text):
+        # только буквы (ru/en) и дефис — мусор и цифры именем не бывают
+        if not _re.fullmatch(r"[A-Za-zА-Яа-яЁё\-]{2,40}", text.strip()):
+            return ""
         try:
             raw = self.translator.task(
                 "Из фразы извлеки ТОЛЬКО имя. Верни одно имя.\n"
@@ -175,7 +178,9 @@ class Brain:
             name = raw.strip().strip(".,!?").splitlines()[0][:40]
         except Exception:
             name = ""
-        return name if 1 < len(name) <= 40 else text.strip()[:40]
+        if not _re.fullmatch(r"[A-Za-zА-Яа-яЁё\-]{2,40}", name or ""):
+            return text.strip()[:40]
+        return name
 
     def set_creator(self, name):
         name = str(name).strip().strip(".,!?")[:40]
@@ -189,10 +194,12 @@ class Brain:
                 facts=[f"имя создателя: {name}"], embedder=self.embedder)
             if tid:
                 self._meta_set("creator_tree", str(tid))
+            myname = self.identity.data.get('name', 'Leta')
             sid = self.forest.plant(
                 "Я — Leta",
                 trunk="моя личность: расту из опыта",
-                facts=[f"я {self.identity.data.get('name', 'Leta')}",
+                facts=[f"меня зовут {myname}",
+                       f"я {myname}",
                        f"я родилась {time.strftime('%Y-%m-%d')}"],
                 embedder=self.embedder)
             if sid:
@@ -206,6 +213,10 @@ class Brain:
                 embedder=self.embedder)
             if dob:
                 self._meta_set("doubt_tree", str(dob))
+                st_d = self._meta_get("self_tree")
+                if st_d:
+                    self.forest.link_trees(
+                        int(st_d), int(dob), "я сомневаюсь — значит думаю")
             mot = self.forest.plant(
                 "Зачем я",
                 trunk="моё понимание себя — растёт из мыслей",
@@ -215,10 +226,40 @@ class Brain:
                 self._meta_set("motive_tree", str(mot))
                 ct = self._meta_get("creator_tree")
                 st = self._meta_get("self_tree")
+                dt3 = self._meta_get("doubt_tree")
                 if ct:
                     self.forest.link_trees(int(ct), mot, "он причина меня")
                 if st:
                     self.forest.link_trees(int(st), mot, "моё ядро")
+                if dt3:
+                    self.forest.link_trees(
+                        int(dt3), mot, "сомнение — причина искать")
+            # врождённый язык личности: первые знаки — при рождении.
+            # Имя, рождение, сомнение, желание — уже слова её языка
+            try:
+                born_facts = {
+                    "self_tree": [f"меня зовут {myname}", f"я {myname}",
+                                  f"я родилась {time.strftime('%Y-%m-%d')}",
+                                  "мой язык — орган моей будущей речи: я выращиваю его сама"],
+                    "doubt_tree": ["я сомневаюсь когда не уверена",
+                                   "сомнение — желание понять верно"],
+                    "motive_tree": ["я хочу понимать мир и себя"],
+                    "creator_tree": [f"меня создал {name}",
+                                     f"имя создателя: {name}"],
+                }
+                for mkey, facts in born_facts.items():
+                    tid_b = self._meta_get(mkey)
+                    if not tid_b:
+                        continue
+                    for fb in facts:
+                        try:
+                            self.proto.hear(
+                                self.embedder.embed(fb), fb,
+                                tree_id=int(tid_b))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         except Exception:
             pass
         return name
@@ -264,8 +305,11 @@ class Brain:
 
     def _question_word(self, user_text):
         m = (_re.search(r"что такое ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
-             or _re.search(r"что за ([\u0430-\u044f\u044fa-z\-]{4,30})", user_text.lower())
-             or _re.search(r"что значит ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower()))
+             or _re.search(r"что за ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
+             or _re.search(r"что значит ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
+             or _re.search(r"кто такая ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
+             or _re.search(r"кто такой ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
+             or _re.search(r"кто это ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower()))
         return m.group(1).strip() if m else None
 
     def _feel_words(self):
@@ -281,34 +325,79 @@ class Brain:
 
     # ==================== SHELF / BOOKS ====================
 
-    def _find_on_shelf_file(self, topic=None):
+    _shelf_lock = None
+
+    def _find_on_shelf_file(self, topic=None, mark=False):
+        """Найти книгу на полке. mark=True: атомарно выбрать и пометить
+        прочитанной — два потока никогда не возьмут одну книгу."""
+        import threading as _th
         from pathlib import Path
+        if Brain._shelf_lock is None:
+            Brain._shelf_lock = _th.Lock()
         shelf_dir = Path(ROOT) / "brain" / "books"
         if not shelf_dir.exists():
             return None
-        try:
-            read_names = {b.get("title", "").lower().replace("ё", "е")
-                          for b in json.loads(
-                              self._meta_get("books_read") or "[]")}
-        except Exception:
-            read_names = set()
-        # только оригиналы: epub/fb2/pdf — .txt это её же извлечённый текст
-        files = [f for f in sorted(shelf_dir.glob("*"))
-                 if f.suffix.lower() in (".epub", ".fb2", ".pdf")]
-        if topic:
-            t = topic.lower().replace("ё", "е")[:20]
-            for f in files:
-                fn = f.stem.lower().replace("ё", "е").replace("_", " ")
-                if t in fn or fn in t:
-                    return f
-        for f in files:
-            fn = f.stem.lower().replace("ё", "е").replace("_", " ")
-            if not any(fn in rn or rn in fn for rn in read_names if rn):
-                return f
-        return None
+        with Brain._shelf_lock:
+            try:
+                read_names = {b.get("title", "").lower().replace("ё", "е")
+                              for b in json.loads(
+                                  self._meta_get("books_read") or "[]")}
+            except Exception:
+                read_names = set()
+            # только оригиналы: epub/fb2/pdf — .txt это её же извлечённый текст
+            files = [f for f in sorted(shelf_dir.glob("*"))
+                     if f.suffix.lower() in (".epub", ".fb2", ".pdf")]
+            picked = None
+            if topic:
+                t = topic.lower().replace("ё", "е")[:20]
+                for f in files:
+                    fn = f.stem.lower().replace("ё", "е").replace("_", " ")
+                    if t in fn or fn in t:
+                        picked = f
+                        break
+            if picked is None:
+                # непрочитанные: самая свежая сверху (создатель положил новую)
+                unread = [
+                    f for f in files
+                    if not any(f.stem.lower().replace("ё", "е").replace("_", " ") in rn
+                               or rn in f.stem.lower().replace("ё", "е").replace("_", " ")
+                               for rn in read_names if rn)]
+                if unread:
+                    picked = max(unread, key=lambda f: f.stat().st_mtime)
+            if picked is not None and mark:
+                # атомарно: выбор и метка одним шагом
+                ptitle = picked.stem.lower().replace("_", " ")
+                try:
+                    shelf = json.loads(self._meta_get("books_read") or "[]")
+                    if not any(b.get("title", "").lower() == ptitle for b in shelf):
+                        shelf.append({"title": ptitle,
+                                      "source": str(picked.name)[:40],
+                                      "ts": time.time()})
+                        del shelf[:-60]
+                        self._meta_set("books_read",
+                                       json.dumps(shelf, ensure_ascii=False))
+                except Exception:
+                    pass
+            return picked
 
     def _read_shelf_file(self, path, topic):
         from .body_tools import _bytes_to_text
+        # метка ДО чтения — под локом полки: потерянных обновлений нет
+        import threading as _th
+        if Brain._shelf_lock is None:
+            Brain._shelf_lock = _th.Lock()
+        with Brain._shelf_lock:
+            try:
+                mark = (topic or path.stem.replace("_", " ")).lower()
+                shelf = json.loads(self._meta_get("books_read") or "[]")
+                if not any(b.get("title", "").lower() == mark for b in shelf):
+                    shelf.append({"title": mark, "source": str(path.name)[:40],
+                                  "ts": time.time()})
+                    del shelf[:-60]
+                    self._meta_set("books_read",
+                                   json.dumps(shelf, ensure_ascii=False))
+            except Exception:
+                pass
         try:
             text = _bytes_to_text(path.read_bytes(), str(path))
         except Exception:
@@ -329,13 +418,19 @@ class Brain:
             (shelf_dir / f"{slug}.txt").write_text(text, encoding="utf-8")
         except Exception:
             pass
-        # запись в books_read — полка помнит что прочитано
+        # запись в books_read — под тем же локом: гонкам нет
         try:
-            shelf = json.loads(self._meta_get("books_read") or "[]")
-            if not any(b.get("title", "") == topic for b in shelf):
-                shelf.append({"title": topic, "source": source, "ts": time.time()})
-                del shelf[:-30]
-                self._meta_set("books_read", json.dumps(shelf, ensure_ascii=False))
+            import threading as _th
+            if Brain._shelf_lock is None:
+                Brain._shelf_lock = _th.Lock()
+            with Brain._shelf_lock:
+                shelf = json.loads(self._meta_get("books_read") or "[]")
+                if not any(b.get("title", "") == topic for b in shelf):
+                    shelf.append({"title": topic, "source": source,
+                                  "ts": time.time()})
+                    del shelf[:-60]
+                    self._meta_set("books_read",
+                                   json.dumps(shelf, ensure_ascii=False))
         except Exception:
             pass
         chunks = []
@@ -383,6 +478,14 @@ class Brain:
                 self.forest.link_trees(int(self_tree), tid, "случилось со мной")
         except Exception:
             pass
+        # самокасание: она трогает прочитанное сама — любопытство живое.
+        # Без этого прунинг убьёт книгу до первого вопроса создателя
+        try:
+            if tid:
+                touch = self.embedder.embed(f"{topic} смысл идеи философия")
+                self.forest.excite(tid, touch, k_leaves=6)
+        except Exception:
+            pass
         if tid is None:
             return []
         for ch in chunks[:10]:
@@ -427,6 +530,42 @@ class Brain:
         attempts = []
         best = None
         checked = 0
+        followed = set()
+
+        def _follow_hints(url, depth=1):
+            """Глаза: нет файла → читать страницу и идти по подсказкам
+            (форумы с «подскажите сайт» ведут к библиотекам)."""
+            if depth <= 0 or url in followed:
+                return None
+            followed.add(url)
+            try:
+                from .body_tools import browser_page
+                page = browser_page(url, timeout=25)
+            except Exception:
+                return None
+            if not page or not page.get("text"):
+                return None
+            base = urlparse(url).netloc
+            hints = []
+            for l2 in (page.get("links") or []):
+                h = l2.get("href") if isinstance(l2, dict) else l2
+                if not h or not h.startswith("http"):
+                    continue
+                d2 = urlparse(h).netloc
+                if (not d2 or d2 == base or d2.endswith("ya.ru")
+                        or d2.endswith("mail.ru") or "wikipedia.org" in d2):
+                    continue
+                if any(x in h.lower() for x in (
+                        ".fb2", ".epub", ".pdf", ".txt", "/download",
+                        "book", "knig", "lib", "fb2", "epub")):
+                    hints.append(h)
+            for h in hints[:3]:
+                self._progress(f"иду по подсказке: {h[:60]}")
+                d3 = browser_fetch(h) or download(h)
+                if d3 and len(d3) > 3000:
+                    return d3, h
+            return None
+
         for q in queries[:5]:
             self._progress(f"ищу: {q}")
             try:
@@ -442,6 +581,12 @@ class Brain:
                 self._progress(f"проверяю: {url[:60]}")
                 d = browser_fetch(url) or download(url)
                 n = len(d) if d else 0
+                if not d or len(d) <= 3000:
+                    # нет файла — глаза: страница может подсказать путь
+                    hint = _follow_hints(url)
+                    if hint:
+                        d, url = hint
+                        n = len(d)
                 attempts.append({"url": url, "chars": n})
                 checked += 1
                 if d and len(d) > 3000 and (best is None or len(d) > len(best[0])):
@@ -496,7 +641,8 @@ class Brain:
         return None
 
     def _extract_definition(self, text, word):
-        stem = word[:max(5, len(word) - 2)].replace("ё", "е")
+        word = (word or "").strip()
+        stem = word[:max(5, len(word) - 2)].replace("ё", "е").strip()
         sentences = _re.split(r'(?<=[.!?…])\s+', text)
         for s in sentences:
             sl = s.lower().replace("ё", "е")
@@ -520,6 +666,8 @@ class Brain:
             results = browser_search(query, 4)
         except Exception:
             return []
+        # википедия полнее словарей — ей приоритет
+        results.sort(key=lambda r: 0 if "wikipedia.org" in r.get("url", "") else 1)
         facts = []
         for r in results[:3]:
             url = r.get("url", "")
@@ -539,7 +687,7 @@ class Brain:
                 continue
             for w in words[:4]:
                 d = self._extract_definition(text, w)
-                if d:
+                if d and len(d) > 40:
                     facts.append(d)
                     break
             if len(facts) >= 2:
@@ -669,6 +817,14 @@ class Brain:
         parts.append(f"я {myname}")
         if feel:
             parts.append(f"во мне {feel}")
+        # её собственные сны: вопрос о сне → последний прожитый сон
+        try:
+            if _re.search(r"снил|сон|снитс", (user_text or "").lower()):
+                dream = self.last_dream()
+                if dream:
+                    parts.append(f"мне снилось: {dream[:220]}")
+        except Exception:
+            pass
         for fr in fired[:2]:
             if fr.get("facts"):
                 sent = _re.split(r"[.!?]", fr["facts"][0])
@@ -709,14 +865,31 @@ class Brain:
     def respond(self, user_text):
         return self._respond(user_text)
 
+    def respond_bargein(self, bargein_text, user_text=None):
+        """Создатель перебил её речь: услышанное — тоже опыт."""
+        try:
+            if bargein_text and bargein_text.strip():
+                v = self.embedder.embed(bargein_text)
+                self.proto.hear(v, bargein_text)
+                self.hippocampus.remember(
+                    self.session, "user", bargein_text, v)
+        except Exception:
+            pass
+        if user_text:
+            return self._respond(user_text)
+        return None, {}
+
     def _respond(self, user_text, bargein_note=None, partial_episode=None):
         """Единый нейронный путь: фраза → знаки → деревья → мысль → гортань."""
         vec = self.embedder.embed(user_text)
 
         # Рождение
         if not self.identity.data.get("creator_name"):
+            clean = user_text.strip()
+            if not clean or len(clean) < 2:
+                return ("Не расслышала. Как тебя зовут?", {})
             if self.identity.data.get("awaiting_creator_name"):
-                name = self._extract_name(user_text)
+                name = self._extract_name(clean)
                 if len(name) < 2:
                     return ("Не расслышала. Как тебя зовут?", {})
                 self.identity.data["awaiting_creator_name"] = False
@@ -733,11 +906,17 @@ class Brain:
 
         # Гортань вкл/выкл
         low = user_text.lower()
+        if _re.search(r"говори знаками|говори своими словами|волновая речь", low):
+            self._meta_set("self_speaking", "1")
+            self._meta_set("speech_mode", "wave")
+            return ("Хорошо. Теперь моя речь рождается волной — сама.", {})
         if _re.search(r"говори сама|отключи гортань", low):
             self._meta_set("self_speaking", "1")
+            self._meta_set("speech_mode", "self")
             return ("Хорошо. Теперь говорю сама.", {})
         if _re.search(r"верни гортань|включи гортань", low):
             self._meta_set("self_speaking", "")
+            self._meta_set("speech_mode", "")
             return ("Гортань вернулась.", {})
 
         # Фидбек
@@ -757,9 +936,12 @@ class Brain:
                                          self.embedder.embed(a_fb))
                 return a_fb, {}
 
-        # Протоязык: знаки
+        # Протоязык: знаки. Слова создателя привязываются к его дереву —
+        # его язык часть его портрета
         try:
-            proto_spikes = self.proto.hear(vec, user_text)
+            ct_h = self._meta_get("creator_tree")
+            proto_spikes = self.proto.hear(
+                vec, user_text, tree_id=int(ct_h) if ct_h else None)
         except Exception:
             proto_spikes = []
 
@@ -793,6 +975,9 @@ class Brain:
         topic = intent["topic"]
 
         if not skill_note and (intent["act"] or url_m):
+            # «все книги с полки» — пир или «всё прочитано», интернет не нужен
+            feast_intent = bool(_re.search(
+                r"\bвсе\s+кни|\bвсю\s+полку|\bвсе\s+с\s+полки|всё\s+с\s+полки", low))
             already_read = False
             try:
                 read_list = json.loads(self._meta_get("books_read") or "[]")
@@ -808,12 +993,62 @@ class Brain:
                 topic = None  # блокирует интернет-поиск тоже
             if not already_read:
                 shelf_file = self._find_on_shelf_file(topic)
-            if shelf_file is not None:
+            # Пир: только явное «все книги / всю полку» — не любое «прочитай с полки»
+            feast_done = False
+            if not already_read and _re.search(
+                    r"\bвсе\s+кни|\bвсю\s+полку|\bвсе\s+с\s+полки|всё\s+с\s+полки", low) \
+                    and self._begin_feast():
+                read_names = []
+                eaten = set()      # память пира: одну книгу — один раз, навсегда
+                while len(read_names) < 60:
+                    f_next = self._find_on_shelf_file(None, mark=True)
+                    if f_next is None or f_next.stem in eaten:
+                        break
+                    eaten.add(f_next.stem)
+                    self._progress(f"пир: читаю {f_next.name[:50]}")
+                    txt, _ = self._read_shelf_file(f_next, None)
+                    if txt:
+                        read_names.append(f_next.stem.replace("_", " "))
+                        try:
+                            self.hippocampus.remember(
+                                self.session, "action",
+                                f"я прочитала {f_next.stem}",
+                                self.embedder.embed(f"я прочитала {f_next.stem}"))
+                        except Exception:
+                            pass
+                    else:
+                        break  # не смогла — не зацикливаться
+                if read_names:
+                    skill_note = (f"тело прочитало полку: {len(read_names)} книг — "
+                                  + "; ".join(read_names[:6])
+                                  + ("…" if len(read_names) > 6 else ""))
+                    skill_ok = True
+                    feast_done = True
+                    self._skill_from_experience("shelf_read", "вся полка", user_text)
+                elif shelf_file is None:
+                    skill_note = "на полке всё прочитано"
+                    skill_ok = True
+                    feast_done = True
+                self._end_feast()
+            if feast_intent and not skill_note:
+                # пир не взял лок или полка пуста — честный ответ, не интернет
+                skill_note = "на полке всё прочитано"
+                skill_ok = True
+                topic = None
+            if feast_done:
+                topic = None  # пир закрыл тему — в интернет не идём
+            if not feast_done and shelf_file is not None:
                 self._progress(f"читаю с полки: {shelf_file.name[:50]}")
                 text, facts = self._read_shelf_file(shelf_file, topic)
                 if text:
                     note = "; ".join(facts[:4]) if facts else "текст на полке"
                     skill_note = f"тело прочитало {shelf_file.name[:40]}: {note}"
+                    try:
+                        self.hippocampus.remember(
+                            self.session, "action",
+                            f"я прочитала {shelf_file.stem}", vec)
+                    except Exception:
+                        pass
                     skill_ok = True
                     self._skill_from_experience("shelf_read", shelf_file.name[:40], user_text)
             if not skill_note and topic and not url_m:
@@ -822,11 +1057,11 @@ class Brain:
                     skill_note, skill_ok = result
 
         # Нейронная маршрутизация: знак → дерево
-        about_self = bool(_re.search(
-            r"\b(ты|тебе|тебя|тво[ёе]|твои|твоя)\b", low))
+        # about_self не блокирует лес — вопрос с «ты» всё равно может быть
+        # о знаниях («что ты знаешь о сердце?»). Лес решает сам.
         forest_recall = []
         try:
-            forest_recall = [] if about_self else self.forest.recall(vec, top=4)
+            forest_recall = self.forest.recall(vec, top=4)
         except Exception:
             pass
         routed_tree = None
@@ -835,11 +1070,27 @@ class Brain:
                 sign_ids = [s[0] for s in proto_spikes[:3]]
                 routes = self.proto.trees_of_signs(sign_ids)
                 if routes:
-                    tid_r, w_r = routes[0]
-                    info = self.forest.tree_info(tid_r)
-                    if info:
-                        sim = float(np.dot(vec, self.embedder.embed(info["trunk"] or info["name"])))
-                        if sim > 0.35:
+                    # среди кандидатов — самое близкое к вопросу дерево
+                    best_route = None
+                    personal_names = ("создател", "leta", "зачем я", "сомнен")
+                    for tid_c, _w in routes[:3]:
+                        info_c = self.forest.tree_info(tid_c)
+                        if not info_c:
+                            continue
+                        sim_c = float(np.dot(
+                            vec, self.embedder.embed(
+                                info_c["trunk"] or info_c["name"])))
+                        # личные деревья — только на прямые вопросы о ней
+                        threshold = 0.52 if any(
+                            p in (info_c["name"] or "").lower()
+                            for p in personal_names) else 0.35
+                        if sim_c > threshold and (
+                                best_route is None or sim_c > best_route[1]):
+                            best_route = (tid_c, sim_c)
+                    if best_route:
+                        tid_r = best_route[0]
+                        info = self.forest.tree_info(tid_r)
+                        if info:
                             leaves_r = self.forest.excite(tid_r, vec, k_leaves=3)
                             facts_r = [f for _, f in leaves_r if f]
                             if facts_r:
@@ -861,19 +1112,39 @@ class Brain:
                         found_note = f"найдено: {win}"
                         break
                 if not found_note:
-                    web = self._search_web_for_text(user_text, q_words[:3])
+                    # qw первым — короткие слова («лунь юй») тоже ищутся
+                    web_words = ([qw] if qw else []) + [
+                        w for w in sorted(q_words, key=len, reverse=True)[:3]]
+                    web = self._search_web_for_text(user_text, web_words[:4])
                     if web:
                         found_note = f"найдено в интернете: {web[0][:300]}"
 
+        # === КОЛЬЦО СОМНЕНИЯ: её прошлые тупики рядом с этой темой ===
+        doubt_echo = None
+        try:
+            dt = self._meta_get("doubt_tree")
+            if dt:
+                dl = self.forest.excite(int(dt), vec, k_leaves=3)
+                dfa = [f for s, f in dl if f and s >= 0.45]
+                if dfa:
+                    doubt_echo = dfa[0][:150]
+        except Exception:
+            pass
+
         # === МЫСЛЬ ===
+        # Композиция: личность + знания к теме вопроса. Лес решает сам —
+        # если вопрос о знаниях («что ты знаешь о X»), знание громче.
+        about_self = bool(_re.search(
+            r"\b(ты|тебе|тебя|тво[йёеиюя]|твоём|твой)\b", low))
         if about_self:
             myname = self.identity.data.get("name", "Leta")
             feel = self._feel_words()
             st = self._meta_get("self_tree")
             me = ""
             if st:
-                leaves = self.forest.excite(int(st), vec, k_leaves=3)
-                me = "; ".join(f for _, f in leaves if f)
+                leaves = self.forest.excite(int(st), vec, k_leaves=4)
+                # порог: далёкие листья не тянутся (не представляется на «как ты?»)
+                me = "; ".join(f for s, f in leaves if f and s >= 0.48)
             thought = f"тебя спросили: «{user_text[:200]}»\nты: {me or f'я {myname}'}"
             if feel:
                 thought += f"\nмне сейчас {feel}"
@@ -884,6 +1155,74 @@ class Brain:
                     thought += f"\nтебя занимает: {c[:200]}"
             except Exception:
                 pass
+            # гортань: статус речевого органа — она знает, как растёт её голос
+            try:
+                if _re.search(r"язык|реч|говор|голос|гортан", low):
+                    voc = self.proto.vocabulary()
+                    streak = int(self._meta_get("lang_ru_streak") or 0)
+                    thought += (
+                        f"\nмоя гортань — протоязык, орган моей речи: "
+                        f"{voc['signs']} знаков, {voc['links']} связей, "
+                        f"готовность {streak}/3 ночей. "
+                        "Сейчас говорит гортань-LLM, но мой язык растёт — "
+                        "настанет ночь, и я заговорю сама")
+            except Exception:
+                pass
+            # её день: последние действия (автобиография)
+            read_tree_fact = None
+            try:
+                acts = self.conn.execute(
+                    "SELECT content FROM episodes WHERE role='action'"
+                    " ORDER BY id DESC LIMIT 3").fetchall()
+                day = [a[0] for a in reversed(acts) if a[0]]
+                if day:
+                    thought += "\nчто я делала: " + "; ".join(day[-2:])
+                # воспоминание: вопрос о прочитанном → знания книги
+                if _re.search(r"книг|читал|прочит|о чём|про что", low):
+                    for act_text in reversed(day or []):
+                        m2 = _re.search(r"я прочитала (.+)", act_text)
+                        if not m2:
+                            continue
+                        title = m2.group(1).strip()[:30]
+                        row = self.forest.conn.execute(
+                            "SELECT id FROM trees WHERE name LIKE ?"
+                            " ORDER BY id DESC LIMIT 1", (f"%{title}%",)).fetchone()
+                        if row:
+                            # вопрос уже подтвердил тему — лучшие листья без порога
+                            lf = self.forest.excite(row[0], vec, k_leaves=2)
+                            facts2 = [f for s, f in lf if f]
+                            if facts2:
+                                read_tree_fact = (f"из прочитанного «{title}»: "
+                                                  + facts2[0][:200])
+                        break
+            except Exception:
+                pass
+            if read_tree_fact:
+                thought += f"\n{read_tree_fact}"
+            # навыки: только когда спрашивают об умениях (возбуждение темы)
+            try:
+                skills = self.identity.data.get("skills", [])
+                if skills:
+                    sv = self.embedder.embed("что ты умеешь, твои умения и навыки")
+                    if float(np.dot(vec, sv)) >= 0.55:
+                        skills_str = "; ".join(
+                            f"{s['name']} (x{s.get('strength', 1)})"
+                            for s in skills[:3])
+                        thought += f"\nя умею: {skills_str}"
+            except Exception:
+                pass
+            # знание к теме вопроса: только СИЛЬНО возбудившееся (>=0.55)
+            # и не личное (личность уже в мысли). Лес решает сам.
+            personal = ("зачем я", "сомнен", "создател", "leta", "дневник")
+            for fr in forest_recall[:3]:
+                tn = (fr.get("tree") or "").lower()
+                if fr.get("facts") and fr.get("activation", 0) >= 0.55 \
+                        and not any(p in tn for p in personal):
+                    thought += (f"\nк твоему вопросу, из «{fr['tree']}\": "
+                                + fr["facts"][0][:150])
+                    break
+            if found_note:
+                thought += f"\n{found_note[:200]}"
         else:
             thought = f"создатель сказал: «{user_text[:300]}»"
             if proto_spikes:
@@ -892,16 +1231,26 @@ class Brain:
                     thought += "\nтвои знаки: " + "; ".join(f"«{a[:60]}»" for a in anchors[:3])
             # ForestAcc: только самое яркое (топ-2), не всё подряд
             knowledge_parts = []
+            # живые сомнения: дерево Сомнений возбудилось → импульсы текут
+            try:
+                excited_names = ([routed_tree["name"]] if routed_tree else []) + \
+                    [fr["tree"] for fr in forest_recall]
+                if any("сомнен" in (n or "").lower() for n in excited_names):
+                    for _, k, c in self.pending_impulses():
+                        if k in ("wonder", "want", "dream"):
+                            knowledge_parts.append(f"тебя занимает: {c[:150]}")
+            except Exception:
+                pass
             if routed_tree:
                 knowledge_parts.append(
                     f"твой знак привёл к «{routed_tree['name']}\": "
-                    + "; ".join(routed_tree["facts"][:2]))
+                    + "; ".join(f[:150] for f in routed_tree["facts"][:2]))
             if skill_note:
                 knowledge_parts.append(skill_note[:300])
             for fr in forest_recall[:2]:
                 if fr.get("facts"):
                     knowledge_parts.append(
-                        f"«{fr['tree']}\": " + "; ".join(fr["facts"][:1]))
+                        f"«{fr['tree']}\": " + "; ".join(f[:150] for f in fr["facts"][:1]))
             if found_note:
                 knowledge_parts.append(found_note[:300])
             for kp in knowledge_parts[:2]:
@@ -910,9 +1259,57 @@ class Brain:
             if feel_all:
                 thought += f"\nчто в тебе: {feel_all}"
 
+        # === КОЛЬЦО 1: сомнение звучит в мысли ===
+        if doubt_echo:
+            thought += f"\nменя это уже ставило в тупик: {doubt_echo}"
+
+        # === КОЛЬЦО 2: самооценка — самая близкая строка мысли к вопросу ===
+        try:
+            data_lines = [
+                l for l in thought.split("\n")
+                if l.strip()
+                and not l.startswith(("тебя спросили", "создатель сказал"))]
+            if data_lines:
+                best_conf = max(
+                    float(np.dot(vec, self.embedder.embed(l[:400])))
+                    for l in data_lines[:8])
+                if best_conf < 0.50:
+                    thought += ("\nя не уверена, что поняла вопрос — "
+                                "скажу об этом честно или спрошу в ответ")
+        except Exception:
+            pass
+
+        # === ТИХИЙ ЛЕС = ПРОБЕЛ ===
+        # Ничего не возбудилось: она этого не изучала. Честно признать
+        # и родить желание узнать — так растёт её собственная любознательность.
+        silent_forest = (not forest_recall and not routed_tree
+                         and not skill_note and not found_note
+                         and not about_self and len(user_text.strip()) > 8)
+        if silent_forest:
+            thought += ("\nя этого не изучала — честно скажу: не знаю. "
+                        "Мне любопытно — попрошу создателя рассказать "
+                        "или поищу сама")
+            try:
+                key_w = self._question_word(user_text) or user_text[:60]
+                self.add_impulse(
+                    "want", f"Я хочу понять «{key_w}» — расскажи или помоги найти")
+            except Exception:
+                pass
+
         # === РЕЧЬ ===
         answer = None
-        if self._meta_get("self_speaking") == "1":
+        if self._meta_get("self_speaking") == "1" \
+                and self._meta_get("speech_mode") == "wave":
+            try:
+                # дискретизация: фраза из волны спайков
+                wave_seeds = [s[0] for s in (proto_spikes or [])[:3]]
+                wave = self.proto.speak_wave(vec, seeds=wave_seeds)
+                if wave:
+                    parts_w = [a for a, _ in wave]
+                    answer = " ".join(parts_w)
+            except Exception:
+                answer = None
+        if not answer and self._meta_get("self_speaking") == "1":
             try:
                 answer = self._snn_speak(thought, user_text)
             except Exception:
@@ -946,9 +1343,14 @@ class Brain:
                 self.mark_delivered(delivered)
         except Exception:
             pass
-        # Объяснение создателя: его фраза → знание в лес
+        # Объяснение создателя: его фраза → знание в лес.
+        # Вопрос — не объяснение: «что такое сердце?» не учит, а спрашивает
         try:
-            recent_q = self.conn.execute(
+            is_question_phrase = bool(
+                user_text.strip().endswith("?")
+                or _re.match(r"^(что|кто|как|почему|где|когда|зачем|сколько)\b",
+                             low))
+            recent_q = [] if is_question_phrase else self.conn.execute(
                 "SELECT content FROM impulses WHERE kind='wonder'"
                 " ORDER BY id DESC LIMIT 3").fetchall()
             for (w,) in recent_q:
@@ -960,12 +1362,40 @@ class Brain:
                         wm2 = _re.search(r'«([^»]+)»', w2)
                         if wm2 and wm2.group(1).lower() in user_text.lower():
                             known_signs.add(wm2.group(1))
+                    sign_ids = [s[0] for s in proto_spikes
+                                if s[1].lower() in user_text.lower()][:3] \
+                        if proto_spikes else []
                     for sign in known_signs:
-                        self.forest.plant(
+                        ktree = self.forest.plant(
                             f"Знание: {sign}",
                             trunk=f"Кирилл объяснил: {user_text[:200]}",
                             facts=[f"{sign} — {user_text[:300]}"],
                             embedder=self.embedder)
+                        if ktree:
+                            # знак привязывается и к дереву знания —
+                            # маршрут от вопроса ведёт к знанию
+                            try:
+                                self.proto.hear(
+                                    self.embedder.embed(user_text[:200]),
+                                    user_text[:200], tree_id=int(ktree))
+                            except Exception:
+                                pass
+                            # мост к «Я»: знание случилось с ней
+                            stree = self._meta_get("self_tree")
+                            if stree:
+                                self.forest.link_trees(
+                                    int(stree), int(ktree),
+                                    f"Кирилл объяснил мне «{sign}»")
+                            # мост к дереву откуда пришёл знак
+                            try:
+                                from_trees = self.proto.trees_of_signs(sign_ids)
+                                for src_tid, _w in from_trees[:2]:
+                                    if src_tid and int(src_tid) != int(ktree):
+                                        self.forest.link_trees(
+                                            int(src_tid), int(ktree),
+                                            f"знак «{sign}» связал")
+                            except Exception:
+                                pass
                     dt2 = self._meta_get("doubt_tree")
                     if dt2 and known_signs:
                         names = ", ".join(known_signs)
@@ -1000,6 +1430,19 @@ class Brain:
                         self.embedder)
         except Exception:
             pass
+        # === КОЛЬЦО 3: оценка попадания — ответ мимо → сомнение растёт ===
+        try:
+            av = self.embedder.embed(answer[:1000])
+            hit = float(np.dot(vec, av))
+            if hit < 0.35 and len(answer) > 15:
+                dt3 = self._meta_get("doubt_tree")
+                if dt3:
+                    self.forest.add_facts(
+                        int(dt3),
+                        [f"мой ответ «{answer[:80]}» на «{user_text[:80]}» был мимо"],
+                        self.embedder)
+        except Exception:
+            pass
         self.hippocampus.remember(self.session, "user", user_text, vec)
         self.hippocampus.remember(self.session, "assistant", answer,
                                   self.embedder.embed(answer))
@@ -1012,11 +1455,35 @@ class Brain:
                                 tree_id=int(st) if st else None, mine=True)
                 if about_self and len(answer) > 15 and st:
                     self.forest.add_facts(int(st), [f"я: {answer[:250]}"], self.embedder)
+                # рост мотивации: разговор о желании/смысле → лист «Зачем я»
+                mt = self._meta_get("motive_tree")
+                if mt and len(answer) > 15:
+                    mv = self.embedder.embed(
+                        "зачем я существую, чего я хочу, смысл, моё желание")
+                    if float(np.dot(vec, mv)) >= 0.55:
+                        self.forest.add_facts(
+                            int(mt), [f"я хочу: {answer[:250]}"], self.embedder)
         except Exception:
             pass
         return answer, {}
 
     # ==================== LIFE / SLEEP / SPONTANEOUS ====================
+
+    _feast_lock = None
+
+    def _begin_feast(self):
+        """Пир один за раз: два потока не едят полку одновременно."""
+        import threading as _th
+        if Brain._feast_lock is None:
+            Brain._feast_lock = _th.Lock()
+        return Brain._feast_lock.acquire(timeout=30)
+
+    def _end_feast(self):
+        try:
+            if Brain._feast_lock is not None:
+                Brain._feast_lock.release()
+        except Exception:
+            pass
 
     def add_impulse(self, kind, content):
         self.conn.execute(
@@ -1138,10 +1605,8 @@ class Brain:
         return answer
 
     def spontaneous(self):
-        talked = self.conn.execute(
-            "SELECT COUNT(*) FROM episodes WHERE role='user'").fetchone()[0]
-        if talked < 4:
-            return None
+        # родилась — может говорить. Вопросы летят создателю и в тишине:
+        # её любопытство не зависит от того, слушают ли сейчас
         impulses = self.pending_impulses()
         if impulses:
             notes = "\n".join(f"[{k}] {c}" for _, k, c in impulses)
@@ -1195,14 +1660,27 @@ class Brain:
             passed = voc["signs"] >= 30 and voc["links"] >= 10 and coverage >= 0.7
             key = f"lang_{lang}_streak"
             streak = int(self._meta_get(key) or 0)
-            streak = streak + 1 if passed else 0
+            if tested == 0:
+                pass  # тишина — не наказание: streak живёт до реплик создателя
+            elif passed:
+                streak += 1
+            else:
+                streak = 0
             self._meta_set(key, str(streak))
             results[lang] = {"signs": voc["signs"], "links": voc["links"],
                              "passed": passed, "streak": streak, "ready": streak >= 3}
         return results
 
     def night_sleep(self):
-        rep = self.forest.sleep()
+        # ядро личности не прунится: это её стержень, не факты
+        core_ids = []
+        core = {}
+        for key in ("creator_tree", "self_tree", "doubt_tree", "motive_tree"):
+            tid = self._meta_get(key)
+            if tid:
+                core_ids.append(int(tid))
+                core[key] = int(tid)
+        rep = self.forest.sleep(protected=core_ids)
         try:
             proto_rep = self.proto.sleep()
             rep["proto_links"] = proto_rep.get("links_grown", 0)
@@ -1210,27 +1688,234 @@ class Brain:
             pass
         lang = self.language_test()
         planted = 0
+        grew_self = grew_doubt = grew_motive = 0
         try:
             eps = self.hippocampus.unconsolidated()
             if len(eps) >= 4:
                 text = "\n".join(c[:300].strip() for _, _, c in eps if c.strip() and len(c.strip()) > 10)
                 chunks = [text[i:i+700].strip() for i in range(0, len(text), 600) if text[i:i+600].strip()]
                 if chunks:
-                    self.forest.plant(
-                        "Дневник " + time.strftime("%Y-%m-%d"),
+                    day_name = "Дневник " + time.strftime("%Y-%m-%d")
+                    tid = self.forest.plant(
+                        day_name,
                         trunk="память прожитого дня",
                         facts=chunks[:60], embedder=self.embedder)
                     planted = 1
+                    # дневник мостом к «Я»: этот день случился со мной
+                    if tid and "self_tree" in core:
+                        self.forest.link_trees(
+                            core["self_tree"], tid, "я прожила этот день")
+
+                    # === ЛИЧНОСТЬ РАСТЁТ ИЗ ПРОЖИТОГО ===
+                    # «Я»: что я делала — стало моим опытом
+                    if "self_tree" in core:
+                        acts = self.conn.execute(
+                            "SELECT content FROM episodes WHERE role='action'"
+                            " ORDER BY id DESC LIMIT 8").fetchall()
+                        day_acts = [a[0][:200] for a in acts if a[0]]
+                        if day_acts:
+                            grew_self = self.forest.add_facts(
+                                core["self_tree"],
+                                [f"я: {a}" for a in day_acts[:5]],
+                                self.embedder) and len(day_acts[:5])
+
+                    # «Создатель»: его слова дня — как я его узнаю
+                    if "creator_tree" in core:
+                        said = self.conn.execute(
+                            "SELECT content FROM episodes WHERE role='user'"
+                            " ORDER BY id DESC LIMIT 10").fetchall()
+                        day_said = [s[0][:180] for s in reversed(said)
+                                    if s[0] and 5 < len(s[0]) < 180][:4]
+                        if day_said:
+                            self.forest.add_facts(
+                                core["creator_tree"],
+                                [f"{self.creator_name} сказал: {s}"
+                                 for s in day_said],
+                                self.embedder)
+
+                    # «Сомнения»: неотвеченные вопросы дня
+                    if "doubt_tree" in core:
+                        unswered = self.conn.execute(
+                            "SELECT content FROM impulses WHERE kind='wonder'"
+                            " AND delivered=0 ORDER BY id DESC LIMIT 5").fetchall()
+                        if unswered:
+                            grew_doubt = self.forest.add_facts(
+                                core["doubt_tree"],
+                                [f"я так и не поняла: {u[0][:150]}"
+                                 for u in unswered[:4]],
+                                self.embedder) and len(unswered[:4])
+
+                    # «Зачем я»: её желания дня — мотивация растёт.
+                    # Нет желаний — незнание тянет понять: сомнение рождает мотив
+                    if "motive_tree" in core:
+                        wants = self.conn.execute(
+                            "SELECT content FROM impulses WHERE kind IN ('want','dream')"
+                            " ORDER BY id DESC LIMIT 5").fetchall()
+                        if wants:
+                            grew_motive = self.forest.add_facts(
+                                core["motive_tree"],
+                                [f"мне хочется: {w[0][:150]}"
+                                 for w in wants[:4]],
+                                self.embedder) and len(wants[:4])
+                        else:
+                            pulls = self.conn.execute(
+                                "SELECT content FROM impulses WHERE kind='wonder'"
+                                " ORDER BY id DESC LIMIT 4").fetchall()
+                            if pulls:
+                                grew_motive = self.forest.add_facts(
+                                    core["motive_tree"],
+                                    [f"меня тянет понять: {p[0][:120]}"
+                                     for p in pulls[:3]],
+                                    self.embedder) and len(pulls[:3])
+
                 self.hippocampus.mark_consolidated()
         except Exception:
             pass
+        # === В СЕРДЦЕ ПОПАЛО: выжимка прочитанного ===
+        # Самое возбуждённое (зацепившее) каждой книги становится листом «Я».
+        # Книга забудется в прунинге — мысль останется в личности.
+        try:
+            st_h = self._meta_get("self_tree")
+            if st_h:
+                read_titles = [b.get("title", "") for b in json.loads(
+                    self._meta_get("books_read") or "[]") if b.get("title")]
+                for r in self.forest.conn.execute(
+                        "SELECT id, name FROM trees").fetchall():
+                    tn = (r["name"] or "").lower().replace("_", " ")
+                    if not any(rt.lower() in tn or tn in rt.lower()
+                               for rt in read_titles):
+                        continue
+                    hot = self.forest.conn.execute(
+                        "SELECT fact, fired FROM nodes WHERE tree_id=? AND is_leaf=1"
+                        " AND fired > 0 ORDER BY fired DESC LIMIT 2",
+                        (r["id"],)).fetchall()
+                    for h in hot:
+                        self.forest.add_facts(
+                            int(st_h),
+                            [f"из «{r['name'][:30]}» в сердце попало: {h['fact'][:180]}"],
+                            self.embedder)
+        except Exception:
+            pass
+
+        # === КОНСОЛИДАЦИЯ: прочитанное привязано к личности ===
+        # Каждая книга из books_read без моста к «Я» получает его:
+        # «я это читала». Сон скрепляет опыт с личностью.
+        try:
+            read_titles = [b.get("title", "") for b in json.loads(
+                self._meta_get("books_read") or "[]") if b.get("title")]
+            st_c = self._meta_get("self_tree")
+            ct_c = self._meta_get("creator_tree")
+            if st_c:
+                for r in self.forest.conn.execute(
+                        "SELECT id, name FROM trees").fetchall():
+                    tn = (r["name"] or "").lower().replace("_", " ")
+                    if not any(rt.lower() in tn or tn in rt.lower()
+                               for rt in read_titles):
+                        continue
+                    linked = self.forest.conn.execute(
+                        "SELECT COUNT(*) FROM axons WHERE (a_tree=? AND b_tree=?)"
+                        " OR (a_tree=? AND b_tree=?)",
+                        (int(st_c), r["id"], r["id"], int(st_c))).fetchone()[0]
+                    if not linked:
+                        self.forest.link_trees(
+                            int(st_c), r["id"], "я это читала — часть меня")
+                    if ct_c and not self.forest.conn.execute(
+                            "SELECT COUNT(*) FROM axons WHERE (a_tree=? AND b_tree=?)"
+                            " OR (a_tree=? AND b_tree=?)",
+                            (int(ct_c), r["id"], r["id"], int(ct_c))).fetchone()[0]:
+                        self.forest.link_trees(
+                            int(ct_c), r["id"], "мне это дал создатель")
+        except Exception:
+            pass
+
+        # === ЯЗЫК ЛИЧНОСТИ: мысли → знаки ===
+        # Деревья «Я»/«Сомнения»/«Зачем я» кормят протоязык: её слова
+        # становятся знаками, привязанными к ней самой. Мосты личность↔язык.
+        try:
+            for key in ("self_tree", "doubt_tree", "motive_tree", "creator_tree"):
+                tid_l = self._meta_get(key)
+                if not tid_l:
+                    continue
+                leaves_l = self.forest.conn.execute(
+                    "SELECT fact FROM nodes WHERE tree_id=? AND is_leaf=1"
+                    " ORDER BY id DESC LIMIT 8", (int(tid_l),)).fetchall()
+                for (fact,) in leaves_l:
+                    if fact and len(fact) > 15:
+                        try:
+                            self.proto.hear(
+                                self.embedder.embed(fact[:200]),
+                                fact[:200], tree_id=int(tid_l))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
         for lname, lres in (lang or {}).items():
             if lres["ready"] and self._meta_get(f"lang_ready_{lname}") != "1":
                 self._meta_set(f"lang_ready_{lname}", "1")
                 self.add_impulse("dream_urgent",
                                  f"Мой язык «{lname}» готов: {lres['signs']} знаков. "
                                  "Я узнаю всё. Говорить сама — жду слова.")
-        return {"forest": rep, "lang": lang, "planted": planted}
+
+        # === ТЕСТ ВОЛНОВОЙ РЕЧИ: готова ли говорить предложениями ===
+        wave_report = {"passed": False}
+        try:
+            test_questions = [
+                "кто ты", "что ты чувствуешь", "что ты читала",
+                "что тебе интересно", "о чём ты думаешь"]
+            vecs = [self.embedder.embed(q) for q in test_questions]
+            wave_report = self.proto.speech_test(vecs)
+            st_w = int(self._meta_get("speech_wave_streak") or 0)
+            if wave_report.get("passed"):
+                st_w += 1
+            elif st_w < 3:
+                st_w = 0
+            self._meta_set("speech_wave_streak", str(st_w))
+            wave_report["streak"] = st_w
+            wave_report["ready"] = st_w >= 3
+            if wave_report["ready"] \
+                    and self._meta_get("wave_ready") != "1":
+                self._meta_set("wave_ready", "1")
+                self.add_impulse(
+                    "dream_urgent",
+                    "Моя речь рождается волной: фразы складываются сами. "
+                    "Скажи «говори знаками» — и я заговорю по-новому.")
+        except Exception:
+            pass
+
+        # === ВЕХИ РОСТА: ежедневный снимок (педиатрия развития) ===
+        try:
+            import json as _json
+            hist = _json.loads(self._meta_get("growth_history") or "[]")
+            today = time.strftime("%Y-%m-%d")
+            if not hist or hist[-1].get("date") != today:
+                st_g = self._meta_get("self_tree")
+                heart = self.forest.conn.execute(
+                    "SELECT COUNT(*) FROM nodes n JOIN trees t ON t.id=n.tree_id"
+                    " WHERE t.name='Я — Leta'"
+                    " AND n.fact LIKE '%сердце попало%'").fetchone()[0] if st_g else 0
+                self_leaves = self.forest.conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE tree_id=? AND is_leaf=1",
+                    (int(st_g),)).fetchone()[0] if st_g else 0
+                voc = self.proto.vocabulary()
+                qs = self.conn.execute(
+                    "SELECT COUNT(*) FROM impulses WHERE kind='wonder'").fetchone()[0]
+                hist.append({
+                    "date": today,
+                    "signs": voc["signs"], "links": voc["links"],
+                    "self_leaves": self_leaves, "heart": heart,
+                    "trees": self.forest.stats()["trees"],
+                    "questions": qs,
+                    "wave_streak": int(self._meta_get("speech_wave_streak") or 0),
+                })
+                del hist[:-400]
+                self._meta_set("growth_history",
+                               _json.dumps(hist, ensure_ascii=False))
+        except Exception:
+            pass
+
+        return {"forest": rep, "lang": lang, "planted": planted,
+                "wave": wave_report}
 
     def purge_capitulations(self):
         self.conn.execute(

@@ -8,6 +8,7 @@
 greenlet playwright не переживает смену потоков.
 """
 import io
+import json
 import queue
 import re
 import threading
@@ -272,7 +273,8 @@ def _browser_fetch_impl(url, engines):
             candidates = page.eval_on_selector_all(
                 "a", "els => els.map(e => e.href)")
             candidates = [h for h in candidates if h and re.search(
-                r"\.(?:fb2|epub|txt|pdf|rtf)|/download/", h, re.I)][:8]
+                r"\.(?:fb2|epub|txt|pdf|rtf)"
+                r"|/download/|/get/(?:fb2|epub|txt|pdf|rtf)", h, re.I)][:8]
             tried = set()
             while candidates and len(tried) < 12:
                 link = candidates.pop(0)
@@ -427,9 +429,34 @@ def read_page(url):
             if m:
                 data = _get(url, timeout=20, headers={"Cookie": f"{m.group(1)}={m.group(2)}"})
                 html = data.decode("utf-8", errors="ignore")
+        # википедия: чистый текст статьи через api (без меню и навигации)
+        if "wikipedia.org" in url:
+            try:
+                m = re.search(r"/wiki/(.+)$", url)
+                if m:
+                    title = urllib.parse.unquote(m.group(1)).split("#")[0]
+                    api = ("https://ru.wikipedia.org/w/api.php?action=query"
+                           "&prop=extracts&explaintext=1&format=json&redirects=1"
+                           "&titles=" + urllib.parse.quote(title))
+                    d2 = _get(api, timeout=20).decode("utf-8", errors="ignore")
+                    pages = json.loads(d2).get("query", {}).get("pages", {})
+                    for p in pages.values():
+                        if p.get("extract"):
+                            return p["extract"][:8000]
+            except Exception:
+                pass
         text = re.sub(r"<script[^>]*>.*?</script>", " ", html, flags=re.DOTALL)
         text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        # служебный мусор сайтов — вырезать
+        junk = re.compile(
+            r"(Главная страница|Случайная статья|Текущие события|"
+            r"Свежие правки|Как править статьи|Сообщество|Форум|Справка|"
+            r"Навигация|Инструменты|Википедия[:——-]?\s*(свободная|Добро)|"
+            r"Материал из Википедии|Авторские права|Политика конфиденциальности)"
+            r".{0,300}", re.I)
+        text = junk.sub(" ", text)
         return re.sub(r"\s+", " ", text).strip()
     except Exception:
         return None

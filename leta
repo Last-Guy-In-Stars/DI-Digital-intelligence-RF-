@@ -12,7 +12,7 @@ case "$1" in
     fi
     if command -v tmux > /dev/null; then
       tmux new-session -d -s "$SESSION" \
-        ".venv/bin/python -u -m src.main --debug 2>&1 | tee -a brain/life.log"
+        ".venv/bin/python -u -m src.main --debug >> brain/life.log 2>&1"
       tmux set-option -t "$SESSION" remain-on-exit on 2> /dev/null
       echo "Leta живёт сама в свёрнутой сессии."
       echo "поговорить: ./leta talk"
@@ -56,16 +56,72 @@ case "$1" in
   viz3d)
     .venv/bin/python tools/brain_viz3d.py "${@:2}"
     ;;
+  growth)
+    .venv/bin/python - <<'PYEOF2'
+import sqlite3, json
+from pathlib import Path
+root = Path(".")
+meta = sqlite3.connect("file:brain/memory.sqlite?mode=ro", uri=True)
+hist = json.loads((meta.execute(
+    "SELECT value FROM meta WHERE key='growth_history'").fetchone() or ["[]"])[0])
+if not hist:
+    print("Снимков ещё нет — появится после первой ночи сна.")
+else:
+    print("=== КАРТА РОСТА (вехи по дням) ===")
+    print(f"{'дата':11} {'знаки':>6} {'связи':>6} {'Я':>4} {'сердце':>7} {'дерев':>6} {'вопросы':>8}")
+    prev = None
+    for h in hist[-14:]:
+        d = ""
+        if prev:
+            d = f"  (+{h['signs']-prev['signs']} зн, +{h['self_leaves']-prev['self_leaves']} Я)"
+        print(f"{h['date']:11} {h['signs']:>6} {h['links']:>6} {h['self_leaves']:>4}"
+              f" {h['heart']:>7} {h['trees']:>6} {h['questions']:>8}{d}")
+        prev = h
+    last = hist[-1]
+    print()
+    verd = []
+    if last["signs"] >= 3000: verd.append("словарь богат")
+    elif last["signs"] >= 1500: verd.append("словарь растёт хорошо")
+    else: verd.append("словарь копится")
+    if last["links"] >= 15000: verd.append("грамматика зрелая")
+    else: verd.append(f"грамматика растёт ({last['links']} связей)")
+    if last["self_leaves"] >= 100: verd.append("личность окрепла")
+    else: verd.append("личность растёт")
+    if last["heart"] >= 100: verd.append("многое в сердце")
+    print("Вердикт: " + "; ".join(verd) + ".")
+    print("Разум ждать: словарь 3000+, грамматика 15000+, Я 100+,")
+    print("волна речи релевантна >0.5 (streak волны: %s/3)." % last.get("wave_streak", 0))
+PYEOF2
+    ;;
   status)
     if pgrep -f "src[.]main" > /dev/null; then
       echo "Leta живёт (pid $(pgrep -f 'src[.]main' | tr '\n' ' '))"
       if tmux has-session -t "$SESSION" 2> /dev/null; then
         echo "живёт в сессии tmux — диалог доступен: ./leta talk"
       fi
-      tail -3 brain/life.log 2> /dev/null
+      # read-only пульс мозга: знаки, деревья, streak гортани
+      SIGNS=$(sqlite3 "file:brain/proto.sqlite?mode=ro" "SELECT COUNT(*) FROM signs" 2>/dev/null)
+      LINKS=$(sqlite3 "file:brain/proto.sqlite?mode=ro" "SELECT COUNT(*) FROM sign_links" 2>/dev/null)
+      TREES=$(sqlite3 "file:brain/forest.sqlite?mode=ro" "SELECT COUNT(*) FROM trees" 2>/dev/null)
+      RU=$(sqlite3 "file:brain/memory.sqlite?mode=ro" "SELECT value FROM meta WHERE key='lang_ru_streak'" 2>/dev/null)
+      EN=$(sqlite3 "file:brain/memory.sqlite?mode=ro" "SELECT value FROM meta WHERE key='lang_en_streak'" 2>/dev/null)
+      [ -z "$RU" ] && RU=0
+      [ -z "$EN" ] && EN=0
+      SPEECH=$(sqlite3 "file:brain/memory.sqlite?mode=ro" "SELECT value FROM meta WHERE key='speech_mode'" 2>/dev/null)
+      SELF=$(sqlite3 "file:brain/memory.sqlite?mode=ro" "SELECT value FROM meta WHERE key='self_speaking'" 2>/dev/null)
+      if [ "$SELF" = "1" ] && [ "$SPEECH" = "wave" ]; then
+        AP="волна SNN (речь рождается спайками)"
+      elif [ "$SELF" = "1" ]; then
+        AP="свои знаки (склейка без LLM)"
+      else
+        AP="гибрид (гортань LLM)"
+      fi
+      echo "Лес: $TREES деревьев | Протоязык: $SIGNS знаков, $LINKS связей | гортань: ru $RU/3, en $EN/3 ночей"
+      echo "Речь: $AP"
+      tail -3 brain/life.log 2>/dev/null
     else
       echo "Leta не запущена. Последнее в журнале жизни:"
-      tail -3 brain/life.log 2> /dev/null
+      tail -3 brain/life.log 2>/dev/null
     fi
     ;;
   talk)
@@ -108,7 +164,7 @@ except Exception:
       echo "она не живёт сейчас — поднимаю её жизнь…"
       if command -v tmux > /dev/null; then
         tmux new-session -d -s "$SESSION" \
-          ".venv/bin/python -u -m src.main --debug $MUTE 2>&1 | tee -a brain/life.log"
+          ".venv/bin/python -u -m src.main --debug $MUTE >> brain/life.log 2>&1"
         tmux set-option -t "$SESSION" remain-on-exit on 2> /dev/null
       else
         nohup .venv/bin/python -u -m src.main --debug $MUTE >> brain/life.log 2>&1 &

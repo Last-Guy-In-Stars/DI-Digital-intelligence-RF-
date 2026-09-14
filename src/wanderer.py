@@ -91,6 +91,19 @@ class Wanderer:
                 facts=chunks[:60], embedder=self.brain.embedder)
         except Exception:
             pass
+        # язык слушает: знаки растут из изученного тоже
+        try:
+            for ch in chunks[::5][:60]:
+                self.brain.proto.hear(
+                    self.brain.embedder.embed(ch), ch[:200], tree_id=planted)
+        except Exception:
+            pass
+        # её живые вопросы из нового
+        try:
+            for w in self.brain._wonder()[:3]:
+                self.brain.add_impulse("wonder", w)
+        except Exception:
+            pass
         if promise and topic == promise and planted:
             try:
                 self.brain._meta_set("active_promise", "")

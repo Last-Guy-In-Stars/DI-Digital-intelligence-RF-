@@ -352,14 +352,16 @@ class Forest:
         """Явный мост между деревьями (контекстная связь, не поиск похожести)."""
         return self._add_axon(t1, t2, name)
 
-    def sleep(self, days_for_prune=2.0):
+    def sleep(self, days_for_prune=2.0, protected=None):
         """Сон-реструктуризация: прунинг, рост дендритов, затухание мостов.
 
+        protected — id деревьев ядра личности (не прунятся никогда).
         Возвращает отчёт о том, что мозг реально сделал ночью.
         """
         import time as _time
         now = _time.time()
         report = {"pruned": 0, "bridges_grown": 0, "bridges_decayed": 0}
+        protected = set(protected or [])
         with self.lock:
             # 1. прунинг: мёртвые листья старых деревьев
             # прунинг: не возбуждавшиеся + отрицательно оценённые
@@ -371,14 +373,24 @@ class Forest:
                 (now - days_for_prune * 86400,
                  now - days_for_prune * 86400)).fetchall()
             for r in rows:
+                if r["tree_id"] in protected:
+                    continue
                 self.conn.execute(
                     "DELETE FROM nodes WHERE id=?", (r["id"],))
                 # осиротевших детей нет (лист), пустые деревья не трогаем
             report["pruned"] = len(rows)
-            # 2. затухание мостов; слабые умирают
+            # 2. затухание мостов; слабые умирают.
+            # МОСТЫ ЯДРА НЕ ЗАТУХАЮТ: стержень личности — орган, не память
+            axon_pairs = {}
+            for r2 in self.conn.execute(
+                    "SELECT id, a_tree, b_tree FROM axons").fetchall():
+                axon_pairs[r2["id"]] = (r2["a_tree"], r2["b_tree"])
             axons = self.conn.execute(
                 "SELECT id, weight FROM axons").fetchall()
             for ax in axons:
+                pair = axon_pairs.get(ax["id"], (None, None))
+                if pair[0] in protected and pair[1] in protected:
+                    continue  # мост ядра личности — вечен
                 w = ax["weight"] * 0.9
                 if w < 0.05:
                     self.conn.execute("DELETE FROM axons WHERE id=?", (ax["id"],))

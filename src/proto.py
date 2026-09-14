@@ -236,6 +236,106 @@ class ProtoLanguage:
             self.conn.commit()
         return {"links_grown": grown}
 
+    def speak_wave(self, vec, max_signs=7, seeds=None):
+        """Дискретизация: фраза рождается волной спайков.
+
+        Вопрос задаёт стартовые потенциалы. Волна идёт по STDP-связям:
+        вспыхнувший знак возбуждает соседей, каждый гаснет на рефрактерный
+        срок. Цепочка вспышек — новое предложение, которого не было.
+        Возвращает [(anchor, sim)], пусто — если волна не пошла.
+        """
+        import numpy as np
+        v = np.asarray(vec, dtype=np.float32)
+        with self.lock:
+            signs = self.conn.execute(
+                "SELECT id, anchor, embedding, heard_count FROM signs"
+                " ORDER BY heard_count DESC LIMIT 600").fetchall()
+        if not signs:
+            return []
+        ids = [r["id"] for r in signs]
+        embs = {r["id"]: np.frombuffer(r["embedding"], dtype=np.float32)
+                for r in signs}
+        anchor = {r["id"]: (r["anchor"] or "")[:80] for r in signs}
+        # стартовые потенциалы: узнанные знаки (спайки) или самые близкие
+        pot = {}
+        if seeds:
+            for sid in seeds[:3]:
+                if sid in embs:
+                    pot[sid] = 1.2  # сразу вспыхивают
+        top = sorted(ids, key=lambda s: -float(np.dot(v, embs[s])))[:3]
+        for sid in top:
+            s = float(np.dot(v, embs[sid]))
+            if s > 0.12:
+                pot[sid] = max(pot.get(sid, 0.0), s * 1.4)
+        if not pot:
+            return []
+        # связи STDP: карта соседей
+        with self.lock:
+            links = self.conn.execute(
+                f"SELECT a, b, weight FROM sign_links"
+                f" WHERE a IN ({','.join('?' * len(ids))})"
+                f" OR b IN ({','.join('?' * len(ids))})",
+                ids + ids).fetchall()
+        nbr = {}
+        for r in links:
+            a, b, w = r["a"], r["b"], r["weight"]
+            nbr.setdefault(a, []).append((b, w))
+            nbr.setdefault(b, []).append((a, w))
+
+        fired_chain = []
+        fired_once = set()   # знак вспыхивает один раз — фраза не повторяется
+        step = 0
+        THRESHOLD = 1.0
+        DECAY = 0.72
+        while len(fired_chain) < max_signs and step < 24:
+            step += 1
+            spikes = [sid for sid, p in pot.items()
+                      if p >= THRESHOLD and sid not in fired_once]
+            if not spikes:
+                # волна не вспыхнула сама — вспыхивает самый яркий знак:
+                # иначе затухание убьёт фразу до первого слова
+                best_seed = max(pot, key=lambda s: pot[s]) if pot else None
+                if best_seed is not None and pot[best_seed] >= 0.35 \
+                        and best_seed not in fired_once:
+                    spikes = [best_seed]
+                else:
+                    pot = {k: p * DECAY for k, p in pot.items()}
+                    continue
+            # самый яркий спайк шага
+            best = max(spikes, key=lambda s: pot[s])
+            fired_chain.append((anchor[best],
+                                round(float(np.dot(v, embs[best])), 3)))
+            fired_once.add(best)
+            pot[best] = 0.0
+            # волна: вспыхнувший возбуждает соседей
+            for nb, w in nbr.get(best, []):
+                if nb in embs:
+                    pot[nb] = min(2.5, pot.get(nb, 0.0) + w * 1.3)
+            pot = {k: p * DECAY for k, p in pot.items()}
+        return fired_chain
+
+    def speech_test(self, vecs):
+        """Готовность волновой речи: N вопросов → фразы.
+        Метрики: релевантность, разнообразие. Готова ли говорить сама."""
+        results = []
+        for v in vecs:
+            phrase = self.speak_wave(v)
+            if phrase:
+                import numpy as np
+                vv = np.asarray(v, dtype=np.float32)
+                joined = " ".join(a for a, _ in phrase)
+                # релевантность: средняя близость знаков к вопросу
+                rel = sum(s for _, s in phrase) / len(phrase)
+                results.append({"n": len(phrase), "rel": round(rel, 3),
+                                "text": joined[:120]})
+        if not results:
+            return {"passed": False, "phrases": results}
+        rel_avg = sum(r["rel"] for r in results) / len(results)
+        diversity = len({r["text"][:40] for r in results}) / len(results)
+        passed = rel_avg >= 0.40 and diversity >= 0.5 and len(results) >= 3
+        return {"passed": passed, "rel": round(rel_avg, 3),
+                "diversity": round(diversity, 3), "phrases": results}
+
     def sign_tree_links(self):
         """Все связи знак-дерево (для визуализации)."""
         with self.lock:

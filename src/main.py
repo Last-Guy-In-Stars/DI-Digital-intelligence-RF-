@@ -15,6 +15,20 @@ from .voice import Voice
 CYAN, YELLOW, DIM, RESET = "\033[36m", "\033[33m", "\033[2m", "\033[0m"
 NAME = "Leta"
 SOCK_PATH = ROOT / "brain" / "soul.sock"
+LIFE_LOG = ROOT / "brain" / "life.log"
+
+
+def log(text):
+    """Жизнь пишет в файл напрямую — stdout ненадёжен в tmux/фоне."""
+    try:
+        with open(LIFE_LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("[%H:%M:%S] ") + text + "\n")
+    except Exception:
+        pass
+    try:
+        print(text, flush=True)
+    except Exception:
+        pass
 
 
 def soul_server(brain, voice):
@@ -59,7 +73,7 @@ def soul_server(brain, voice):
                 with lock:
                     client_types[conn] = ctype
                 name = "приложение" if ctype == "app" else "терминал"
-                print(f"{DIM}[клиент] {name} с ней на связи{RESET}", flush=True)
+                log(f"[клиент] {name} с ней на связи")
             return
         if kind == "user":
             text = str(msg.get("text", "")).strip()
@@ -131,7 +145,7 @@ def soul_server(brain, voice):
                 clients.remove(conn)
             was_app = client_types.pop(conn, None) == "app"
         if was_app:
-            print(f"{DIM}[клиент] приложение ушло — пуши через резерв{RESET}", flush=True)
+            log("[клиент] приложение ушло — пуши через резерв")
 
     def accept_loop():
         while not stop_evt.is_set():
@@ -294,30 +308,28 @@ def soul_client(mute=False):
 
 def status(brain, voice, engine=None):
     c = brain.conn
-    neurons = c.execute("SELECT COUNT(*) FROM neurons").fetchone()[0]
-    synapses = c.execute("SELECT COUNT(*) FROM synapses").fetchone()[0]
     episodes = c.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
     impulses = c.execute(
         "SELECT COUNT(*) FROM impulses WHERE delivered=0"
     ).fetchone()[0]
-    domains = c.execute(
-        "SELECT domain, COUNT(*) n FROM neurons GROUP BY domain"
-        " ORDER BY n DESC LIMIT 5"
-    ).fetchall()
     print(f"{DIM}--- {NAME} ---{RESET}")
     print(
-        f"Нейронов: {neurons} | Синапсов: {synapses} | "
         f"Эпизодов: {episodes} | Импульсов несказанных: {impulses}"
     )
     try:
         voc = brain.proto.vocabulary()
-        streak = brain._meta_get("lang_pass_streak") or 0
+        ru_streak = brain._meta_get("lang_ru_streak") or 0
+        en_streak = brain._meta_get("lang_en_streak") or 0
         print(f"Протоязык: {voc['signs']} знаков, {voc['links']} связей | "
-              f"тест языка: {streak}/3 ночей подряд")
+              f"язык готовится: ru {ru_streak}/3, en {en_streak}/3 ночей")
     except Exception:
         pass
-    if domains:
-        print(f"Домены: {', '.join(f'{d} ({n})' for d, n in domains)}")
+    try:
+        fstats = brain.forest.stats()
+        print(f"Лес: {fstats['trees']} деревьев, {fstats['leaves']} листьев, "
+              f"{fstats['splits']} сплитов, {fstats['axons']} мостов")
+    except Exception:
+        pass
     brother = brain.brother.data
     if brother.get("name") or brother.get("facts"):
         known = f"имя: {brother['name']}" if brother.get("name") else ""
@@ -344,12 +356,12 @@ def live(brain, voice, debug):
 
     def _on_progress(msg):
         broadcast({"type": "status", "who": "body", "text": msg})
-        if debug:
-            print(f"{DIM}[тело] {msg}{RESET}", flush=True)
+        log(f"[тело] {msg}")
 
     brain.progress_hook = _on_progress
 
     def announce(text):
+        log(f"[сама] {text}")
         print(f"\n{CYAN}{NAME}:{RESET} {text}\n")
         voice.speak(text)
         push_notify(f"{NAME} написала", text)
@@ -363,8 +375,8 @@ def live(brain, voice, debug):
         sleep_from, sleep_to = brain.cfg.data.get("sleep_hours", [2, 7])
         explored_once = False
         while not stop.is_set():
-            neurons = brain.conn.execute("SELECT COUNT(*) FROM neurons").fetchone()[0]
-            interval = 120 if neurons < 30 else 480
+            trees = brain.forest.stats()["trees"]
+            interval = 120 if trees < 30 else 480
             st = brain.limbic.state
             if st["boredom"] > 0.6 or st["curiosity"] > 0.65:
                 interval = min(interval, 240)
@@ -376,43 +388,96 @@ def live(brain, voice, debug):
             try:
                 hour = time.localtime().tm_hour
                 snap = brain.body.snapshot()
-                if debug:
-                    print(f"{DIM}[тело] {snap}{RESET}")
+                log(f"[тело] {snap}")
                 issues = brain.body.constraints(snap)
                 if issues:
                     last = brain._meta_get("last_constraint")
                     fresh = last is None or time.time() - float(last) > 3600
                     if debug:
-                        print(f"{DIM}[квоты] {issues}{RESET}")
+                        log(f"[квоты] {issues}")
                     if fresh:
                         brain._meta_set("last_constraint", str(time.time()))
                         announce(brain.raise_constraint(issues))
                 elif sleep_from <= hour < sleep_to:
-                    result = brain.night_sleep()
-                    if debug and result:
-                        print(f"{DIM}[сон] {result}{RESET}")
+                    # глубокий сон — раз в сутки, не каждый цикл
+                    try:
+                        last_deep = float(
+                            brain._meta_get("last_deep_sleep") or 0)
+                    except Exception:
+                        last_deep = 0.0
+                    if time.time() - last_deep > 20 * 3600:
+                        brain._meta_set("last_deep_sleep", str(time.time()))
+                        result = brain.night_sleep()
+                        log(f"[сон] {result}")
+                        if debug:
+                            print(f"{DIM}[сон] {result}{RESET}")
                 elif brain.body.needs_rest(snap):
                     action = brain.feel_body()
                     if debug:
-                        print(f"{DIM}[тело] она выбирает: {action}{RESET}")
+                        log(f"[тело] она выбирает: {action}")
                     if (action == "go" and brain.wants_to_explore()
                             and brain.forest.stats()["trees"] >= 2):
                         result = wanderer.cycle()
                         if debug:
-                            print(f"{DIM}[изучение] {result}{RESET}")
+                            log(f"[изучение] {result}")
                 elif (brain.wants_to_explore()
                         and brain.forest.stats()["trees"] >= 2):
-                    result = wanderer.cycle()
-                    if debug:
-                        print(f"{DIM}[изучение] {result}{RESET}")
+                    # полка зовёт: одна книга за цикл (без пира — он только по команде)
+                    shelf_file = None
+                    try:
+                        shelf_file = brain._find_on_shelf_file(None)
+                    except Exception:
+                        pass
+                    if shelf_file is not None:
+                        try:
+                            # перепроверить атомарно: взять и пометить
+                            shelf_file = brain._find_on_shelf_file(None, mark=True) or shelf_file
+                            txt, _ = brain._read_shelf_file(shelf_file, None)
+                            if txt and debug:
+                                log(f"[полка] прочитала: {shelf_file.stem[:40]}")
+                            if txt:
+                                try:
+                                    brain.hippocampus.remember(
+                                        brain.session, "action",
+                                        f"я прочитала {shelf_file.stem}",
+                                        brain.embedder.embed(f"я прочитала {shelf_file.stem}"))
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            if debug:
+                                log(f"[полка] {e}")
+                        result = {"topic": shelf_file.stem[:30], "planted": bool(txt)}
+                    else:
+                        result = wanderer.cycle()
+                        if result:
+                            try:
+                                brain.hippocampus.remember(
+                                    brain.session, "action",
+                                    f"я изучала: {str(result)[:120]}",
+                                    brain.embedder.embed(str(result)[:200]))
+                            except Exception:
+                                pass
+                        if debug:
+                            log(f"[изучение] {result}")
                 elif debug:
-                    print(f"{DIM}[покой] не тянет изучать{RESET}")
+                    log("[покой] не тянет изучать")
             except Exception as e:
                 if debug:
-                    print(f"{DIM}[ошибка] {e}{RESET}")
+                    log(f"[ошибка] {e}")
 
     life_thread = threading.Thread(target=life_loop, daemon=True)
     life_thread.start()
+
+    # технический прогрев: модели в памяти, первый ответ быстрый.
+    # Никаких диалогов и памяти — чистая механика.
+    def warm_models():
+        try:
+            _ = brain.embedder.embed("прогрев")
+            brain.translator.task("ответь одним словом: тест")
+            log("[прогрев] модели в памяти")
+        except Exception as e:
+            log(f"[прогрев] {e}")
+    threading.Thread(target=warm_models, daemon=True).start()
 
     if not brain.identity.is_newborn:
         brain.wake_up()
@@ -571,11 +636,6 @@ def live(brain, voice, debug):
         answer, meta = brain.respond(user)
         print(f"\r\033[K{CYAN}{NAME}:{RESET} {answer}\n")
         voice.speak(answer)
-        if debug:
-            tags = meta["domain"] + ("; новая тема" if meta["novel"] else "")
-            if meta.get("learned"):
-                tags += f"; выучила: {'; '.join(meta['learned'])[:100]}"
-            print(f"{DIM}  [{tags} | {meta['emotions']}]{RESET}\n")
         mark_ready()
     stop.set()
     life_thread.join(timeout=20)
@@ -599,8 +659,8 @@ def pipe_mode(brain, voice, debug):
         sleep_from, sleep_to = brain.cfg.data.get("sleep_hours", [2, 7])
         explored_once = False
         while not life_stop.is_set():
-            neurons = brain.conn.execute("SELECT COUNT(*) FROM neurons").fetchone()[0]
-            interval = 120 if neurons < 30 else 480
+            trees = brain.forest.stats()["trees"]
+            interval = 120 if trees < 30 else 480
             st = brain.limbic.state
             if st["boredom"] > 0.6 or st["curiosity"] > 0.65:
                 interval = min(interval, 240)
@@ -622,7 +682,14 @@ def pipe_mode(brain, voice, debug):
                         emit({"type": "answer", "who": "leta", "text": msg, "spontaneous": True})
                         voice.speak(msg)
                 elif sleep_from <= hour < sleep_to:
-                    brain.night_sleep()
+                    try:
+                        last_deep = float(
+                            brain._meta_get("last_deep_sleep") or 0)
+                    except Exception:
+                        last_deep = 0.0
+                    if time.time() - last_deep > 20 * 3600:
+                        brain._meta_set("last_deep_sleep", str(time.time()))
+                        brain.night_sleep()
                 elif brain.body.needs_rest(snap):
                     action = brain.feel_body()
                     if action == "go" and brain.wants_to_explore():
