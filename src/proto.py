@@ -167,6 +167,10 @@ class ProtoLanguage:
                 continue
             if "не понимаю" in low and "объясни" in low:
                 continue  # это погасший вопрос-импульс, не знание
+            if any(m in low for m in (
+                    "формулировк", "/no_think", "данные её состояния",
+                    "ответ leta =", "перескажи их все")):
+                continue  # шрам гортани: системный промпт, не её слова
             clean.append(a)
         return clean
 

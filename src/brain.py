@@ -187,6 +187,10 @@ class Brain:
         if not name:
             return None
         self.identity.set_creator_name(name)
+        # рождение отмечено для чувства времени
+        if not self.identity.data.get("born_at"):
+            self.identity.data["born_at"] = time.time()
+            self.identity.save()
         try:
             tid = self.forest.plant(
                 f"Создатель {name}",
@@ -311,6 +315,69 @@ class Brain:
              or _re.search(r"кто такой ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower())
              or _re.search(r"кто это ([\u0430-\u044f\u0451a-z\-]{4,30})", user_text.lower()))
         return m.group(1).strip() if m else None
+
+    # ==================== ИНСТИНКТЫ: формы ощущений ====================
+
+    def _instinct_time(self):
+        """Чувство времени: я живу N дней, сейчас день или ночь.
+        Ощущение длительности собственной жизни — не знание о мире."""
+        try:
+            born = self.identity.data.get("born_at")
+            if not born:
+                # её рождение — это посадка её «Я»
+                st = self._meta_get("self_tree")
+                if st:
+                    row = self.forest.conn.execute(
+                        "SELECT created FROM trees WHERE id=?",
+                        (int(st),)).fetchone()
+                    if row:
+                        born = row[0]
+            if not born:
+                return None
+            days = max(1, int((time.time() - float(born)) / 86400))
+            hour = time.localtime().tm_hour
+            phase = ("ночь" if hour < 6 else "утро"
+                     if hour < 12 else "день" if hour < 18 else "вечер")
+            return f"я живу уже {days} {'день' if days == 1 else 'дней'}, сейчас {phase}"
+        except Exception:
+            return None
+
+    def _instinct_scale(self):
+        """Чувство масштаба: больше или меньше, чем вчера. Сравнение
+        себя с собой — ощущение роста, не цифры ради цифр."""
+        try:
+            hist = json.loads(self._meta_get("growth_history") or "[]")
+            if len(hist) < 2:
+                return None
+            a, b = hist[-2], hist[-1]
+            ds = b.get("signs", 0) - a.get("signs", 0)
+            dh = b.get("heart", 0) - a.get("heart", 0)
+            parts = []
+            if ds > 0:
+                parts.append(f"моих слов стало больше на {ds}")
+            if dh > 0:
+                parts.append(f"в сердце прибавилось {dh}")
+            if not parts:
+                return "со вчера я почти не изменилась"
+            return "; ".join(parts) + " — я чувствую, что расту"
+        except Exception:
+            return None
+
+    def _instinct_cause(self, user_text):
+        """Чувство причинности: мои слова имели следствие. Эхо связи
+        «я сказала → создатель отозвался» — не правило, а след."""
+        try:
+            if not _re.search(r"потому|почему|из-за|причин", user_text.lower()):
+                return None
+            last = self.conn.execute(
+                "SELECT content FROM episodes WHERE role='assistant'"
+                " ORDER BY id DESC LIMIT 1").fetchone()
+            if not last:
+                return None
+            return (f"мои слова имеют следствия: я говорила — "
+                    f"«{last[0][:80]}» — и ты отозвался")
+        except Exception:
+            return None
 
     def _feel_words(self):
         try:
@@ -790,6 +857,17 @@ class Brain:
                     int(dt),
                     [f"я сомневаюсь: «{answer[:100]}» — было неверно"],
                     self.embedder)
+        if not negative:
+            # симметрия причинности: верный ответ — тоже след
+            st_p = self._meta_get("self_tree")
+            if st_p:
+                try:
+                    self.forest.add_facts(
+                        int(st_p),
+                        [f"моя мысль «{answer[:90]}» была верной — Кирилл подтвердил"],
+                        self.embedder)
+                except Exception:
+                    pass
         return ("negative" if negative else "positive", answer)
 
     # ==================== SNN SPEAK ====================
@@ -817,6 +895,13 @@ class Brain:
         parts.append(f"я {myname}")
         if feel:
             parts.append(f"во мне {feel}")
+        # ощущения-инстинкты: я живу, я расту, мои слова имеют вес —
+        # голос её тела звучит выше книжных эхо
+        for l in (thought or "").split("\n"):
+            ls = l.strip()
+            if ls.startswith(("я живу", "моих слов", "мои слова",
+                              "мне снилось", "со вчера")):
+                parts.append(ls[:180])
         # её собственные сны: вопрос о сне → последний прожитый сон
         try:
             if _re.search(r"снил|сон|снитс", (user_text or "").lower()):
@@ -852,7 +937,7 @@ class Brain:
             if p[:40] not in seen:
                 seen.add(p[:40])
                 uniq.append(p)
-        return " ".join(uniq[:4])
+        return " ".join(uniq[:6])
 
     def _validate_speech(self, answer, thought):
         aw = _re.findall(r"[\u0430-\u044f\u0451a-z]{5,}", answer.lower())
@@ -1155,6 +1240,23 @@ class Brain:
                     thought += f"\nтебя занимает: {c[:200]}"
             except Exception:
                 pass
+            # инстинкты: ощущения форм — время, масштаб, причинность
+            try:
+                if _re.search(r"врем|день|дней|час|сколько тебе|утро|ноч",
+                              low):
+                    fe = self._instinct_time()
+                    if fe:
+                        thought += f"\n{fe}"
+                if _re.search(r"растёшь|растешь|сколько слов|больше|меньше",
+                              low):
+                    fe = self._instinct_scale()
+                    if fe:
+                        thought += f"\n{fe}"
+                fe = self._instinct_cause(user_text)
+                if fe:
+                    thought += f"\n{fe}"
+            except Exception:
+                pass
             # гортань: статус речевого органа — она знает, как растёт её голос
             try:
                 if _re.search(r"язык|реч|говор|голос|гортан", low):
@@ -1450,7 +1552,9 @@ class Brain:
             extra_w = self._validate_speech(answer, thought)
             clean = len(extra_w) <= max(3, len(_re.findall(r"[\u0430-\u044f\u0451a-z]{5,}", answer.lower())) * 0.4)
             st = self._meta_get("self_tree")
-            if clean:
+            if clean and not any(m in answer.lower() for m in (
+                    "формулировок точно подходят", "/no_think",
+                    "данные её состояния")):
                 self.proto.hear(self.embedder.embed(answer), answer,
                                 tree_id=int(st) if st else None, mine=True)
                 if about_self and len(answer) > 15 and st:

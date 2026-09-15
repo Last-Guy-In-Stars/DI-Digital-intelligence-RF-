@@ -273,8 +273,8 @@ def build_fig(conn, tree_id=None, anim_fps=0, proto_only=False):
             text=[f"«{name}» — {(trunk or '')[:120]}"],
             hoverinfo="text", name=name[:25], showlegend=True))
 
-    # аксионы-мосты
-    ax, ay, az = [], [], []
+    # аксионы-мосты: координаты + веса
+    ax, ay, az, axw = [], [], [], []
     for a, b, w in axons:
         if a not in centers or b not in centers:
             # режим одного дерева: показать соседей и мосты к ним
@@ -294,6 +294,7 @@ def build_fig(conn, tree_id=None, anim_fps=0, proto_only=False):
         ax += [x1, x2, None]
         ay += [y1, y2, None]
         az += [z1, z2, None]
+        axw.append(w)
         all_edges.append(((x1, y1, z1), (x2, y2, z2), "axon"))
     # соседние деревья (подключённые аксонами в режиме одного дерева)
     for tid2, name2, trunk2 in tree_data:
@@ -305,10 +306,33 @@ def build_fig(conn, tree_id=None, anim_fps=0, proto_only=False):
             hoverinfo="text", name=name2[:25], customdata=[tid2],
             showlegend=True))
     if ax:
+        # сила моста: толщина и яркость по весу (затух ← 0.3 новорожденный
+        # → 1.0 прокачанный совместными возбуждениями)
+        axw = axw if isinstance(axw, list) else [0.3] * (len(ax) // 3)
         fig.add_trace(go.Scatter3d(
             x=ax, y=ay, z=az, mode="lines",
-            line=dict(color="#b06ad4", width=5),
-            name="аксоны-мосты", showlegend=True))
+            line=dict(color="#b06ad4", width=4),
+            name="аксоны-мосты (толщина = сила)", showlegend=True))
+        # яркие мосты поверх: чем сильнее — тем толще и белее
+        for lvl, (w_min, w_max, width, col) in enumerate([
+                (0.32, 1.01, 9, "#f0c8ff"),   # крепкие — толстые светлые
+                (0.26, 0.32, 6, "#d29ae8"),   # живые
+                (0.0, 0.26, 3, "#7a5a94")]):  # затухающие — тонкие тёмные
+            sx, sy, sz = [], [], []
+            for i3 in range(0, len(ax) - 2, 3):
+                if ax[i3] is None:
+                    continue
+                w3 = axw[i3 // 3] if i3 // 3 < len(axw) else 0.3
+                if w_min <= w3 < w_max:
+                    sx += ax[i3:i3 + 2] + [None]
+                    sy += ay[i3:i3 + 2] + [None]
+                    sz += az[i3:i3 + 2] + [None]
+            if sx:
+                fig.add_trace(go.Scatter3d(
+                    x=sx, y=sy, z=sz, mode="lines",
+                    line=dict(color=col, width=width),
+                    name=f"мосты {'%.0f' % (w_min*100)}-{int(w_max*100)}%",
+                    showlegend=True))
 
     # протоязык: кластеры по языкам
     signs, sign_links, sign_tree_links = read_proto()
